@@ -2,11 +2,9 @@
 // - enhancement to autoQC_counter.ijm for single images only, displaying area masks 
 //
 // Usage:
-// - single image and batch modes, selected in dialog
 // - user-specified red-channel (mean +/- N stdDev, for peaks) & ratio thresholds 
 // - both modes expect 2D multi-channel (2+) input image(s)
-// - ROIs for cells *only* should be in ROI manager, or image overlays in batch mode
-// - batch mode runs on a folder of .tif images saved from ImageJ with ROI overlays
+// - ROIs for cells *only* should be in ROI manager or image overlay
 //
 // Output:
 // - output image with cell ROIs and multi-point spot ROIs added to overlay:
@@ -14,18 +12,16 @@
 //   - output channel 1=red, 2=green, 3=red+yellow (yellow), 4=red only (magenta)
 // - summary results: 1 row per cell ROI (results for all images appended to table):
 //   - Image name
-//   - Cell ROI name
-//   - ROI XY top-left coords, X_tl & Y_tl
-//   - cell area
+//   - Cell ROI name and X,Y centroid position
+//   - Cell area
 //   - number of spots below red threshold intensity, nBlack
 //   - number of red spots, nRed
 //   - number of red+green spots, nYellow
 //   - total areas of: red, yellow, red+yellow
 //   - (parameters: peakNstd,redMinimumSD,rThresh,spotSize)
 //
-// g.ball@dundee.ac.uk, Dundee Imaging Facility (2020)
+// g.ball@dundee.ac.uk, Dundee Imaging Facility (2020-2023)
 // license: MIT License
-
 
 
 // parameters
@@ -36,10 +32,13 @@ redMinimumSD = 2.5;  // minimum red intensity for spots: mean+/-nStdDev
 rThresh = 1.0;  // minimum red/green value for red spots
 spotSize = 0.1;  // calibrated units (microns)
 DoGmultiplier = 5;  // multiplier for DoG filter
-showRedSpotImage = true;  // option to show red spot image
+showRedBlobImage = false;  // option to show red blob image
 
 
 // --- start Macro ---
+if (Overlay.size > 0) {
+	run("To ROI Manager");
+}
 
 // check we have at least 1 ROI & composite image before going further
 nRois = roiManager("count");
@@ -91,38 +90,51 @@ run("Median...", "radius=1");  // all channels
 filteredTitle = "" + baseName(inpTitle) + "_filtered.tif";
 rename(filteredTitle);
 
-// generate red spot image (DoG filter)
+// calculate "redMinimum" threshold red intensity using whole-image mean, SD
 Stack.setChannel(redCh);
-redSpotImageID = dogFilter(filteredID, spotSize, DoGmultiplier);
-rename("redSpotImage");
+getStatistics(area, redMean, redMin, redMax, redStd);  // whole image
+redMinimum = redMean + (redStd * redMinimumSD);
+
+// generate red blob image (DoG filter) & calculate peakThresh
+redBlobImageID = dogFilter(filteredID, spotSize, DoGmultiplier);
+rename("redBlobImage");
+selectImage(redBlobImageID);
+run("Select None");
+getStatistics(area, mean, min, max, std);  // whole image
+peakThresh = peakNstd * std;
 
 run("Clear Results");
 resultsRow = 0;
-// iterate over ROIs (cells)
+// iterate over ROIs/cells - write results row and results image for each
 for (r = 0; r < nRois; r++) {
+	selectWindow("redBlobImage");
+	setResult("Image", resultsRow, inpTitle);
+	setResult("RoiN", resultsRow, r);
 	// find peaks in DoG-filtered red "spot image"
-	selectImage(redSpotImageID);
-	run("Select None");
-	getStatistics(area, mean, min, max, std);  // whole image
-	peakThresh = peakNstd * std;  
 	roiManager("select", r);
+	setResult("RoiName", resultsRow, Roi.getName());
+	setResult("RoiX", resultsRow, getValue("X"));
+	setResult("RoiY", resultsRow, getValue("Y"));
+	setResult("CellArea_" + areaUnits, resultsRow, getValue("Area"));
+	run("Duplicate...", "title=redBlobImage-" + r);
 	run("Find Maxima...", "prominence=" + peakThresh + " output=[Point Selection]");
 	getSelectionCoordinates(xc, yc);
 	nSpots = xc.length;
 	// create red spot image mask
-	run("Select None");
-	run("Duplicate...", " ");
+	roiManager("select", r);
 	setThreshold(peakThresh, max);
 	run("Convert to Mask");
 	rename("redSpotMask");
 	redSpotMaskID = getImageID();
 	// create red/green ratio image mask
 	selectImage(filteredID);
+	roiManager("select", r);
 	Stack.setChannel(redCh);
 	run("Duplicate...", " ");
 	rename("redChannelImage");
 	redImageID = getImageID();
 	selectImage(filteredID);
+	roiManager("select", r);
 	Stack.setChannel(grnCh);
 	run("Duplicate...", " ");
 	rename("greenChannelImage");
@@ -133,13 +145,9 @@ for (r = 0; r < nRois; r++) {
 	run("Convert to Mask");
 	rename("redOverGreenRatioMask");
 	ratioMaskID = getImageID();
-	selectImage(greenImageID);
-	close();
-	// calculate redMinimum using whole-image mean, SD; & create redMinimumMask
+	// create redMinimumMask
 	selectImage(redImageID);
-	run("Select None");
-	getStatistics(area, redMean, redMin, redMax, redStd);  // whole image
-	redMinimum = redMean + (redStd * redMinimumSD);
+	run("Duplicate...", " ");
 	setThreshold(redMinimum, max);
 	run("Convert to Mask");
 	rename("redAboveMinimumMask");
@@ -152,51 +160,45 @@ for (r = 0; r < nRois; r++) {
 	close();
 	selectImage(redAboveMinimumID);
 	close();
-	areaRedAndYellow = measureMaskArea(redAndYellowSpotMaskID, r);
 	selectImage(redAndYellowSpotMaskID);
+	areaRedAndYellow = getValue("Area");
+	//areaRedAndYellow = measureMaskArea(redAndYellowSpotMaskID, r);
 	run("" + inpBitDepth + "-bit");  // convert to input bit-depth for merge
 	// calculate mask for above-thresh red spots that are red (R/G above ratio thresh)
 	imageCalculator("AND create", "redAndYellowSpotMask","redOverGreenRatioMask");
 	rename("redOnlySpotMask");
 	redOnlyMaskID = getImageID();
+	areaRedOnly = getValue("Area");
+	run("" + inpBitDepth + "-bit");  // convert to input bit-depth for merge
 	selectImage(ratioMaskID);
 	close();
-	areaRedOnly = measureMaskArea(redOnlyMaskID, r);
-	selectImage(redOnlyMaskID);
-	run("" + inpBitDepth + "-bit");  // convert to input bit-depth for merge
-	// append red+yellow and red-only mask channels to filtered image
-	selectImage(filteredID);
-	run("Split Channels");
-	C1name = "c1=[C" + redCh + "-" + filteredTitle + "]";
-	C2name = "c2=[C" + grnCh + "-" + filteredTitle + "]";
+	selectImage(greenImageID);
+	C1name = "c1=redChannelImage";
+	C2name = "c2=greenChannelImage";
 	C3name = "c3=redAndYellowSpotMask";
 	C4name = "c4=redOnlySpotMask";
 	channelsString = "" + C1name + " " + C2name + " " +  C3name + " " + C4name + " create";
 	run("Merge Channels...", channelsString);
-	filteredID = getImageID();
-	rename(filteredTitle);
+	mergeID = getImageID();
+	rename(filteredTitle + "_ROI" + r);
 	Stack.setChannel(1);
 	run("Red");
+	appendChannelInfoToSliceLabels(mergeID, 1, "red");
 	run("Enhance Contrast", "saturated=0.35");
 	Stack.setChannel(2);
 	run("Green");
+	appendChannelInfoToSliceLabels(mergeID, 2, "green");
 	run("Enhance Contrast", "saturated=0.35");
 	Stack.setChannel(3);
 	run("Yellow");
+	appendChannelInfoToSliceLabels(mergeID, 3, "spotsRed+Yellow");
 	setMinAndMax(0, 255);
 	Stack.setChannel(4);
 	run("Magenta");
+	appendChannelInfoToSliceLabels(mergeID, 4, "spotsRedOnly");
 	setMinAndMax(0, 255);
 	// record cell ROI stats
-	selectImage(filteredID);
-	roiManager("select", r);
-	Overlay.addSelection();
-	setResult("CellROI", resultsRow, Roi.getName());
-	Roi.getBounds(x, y, w, h);
-	setResult("X_tl", resultsRow, "" + x);
-	setResult("Y_tl", resultsRow, "" + y);
-	getStatistics(area, mean, min, max, std);  // cell ROI
-	setResult("CellArea_" + areaUnits, resultsRow, area);
+	selectImage(mergeID);
 	nBlack = 0;
 	xBlack = newArray(nSpots);
 	yBlack = newArray(nSpots);
@@ -244,6 +246,7 @@ for (r = 0; r < nRois; r++) {
 	setResult("areaYellow_" + areaUnits, resultsRow, areaRedAndYellow - areaRedOnly);	
 	setResult("spotSize_" + areaUnits, resultsRow, spotSize);
 	setResult("peakNstd", resultsRow, peakNstd);
+	setResult("peakThresh", resultsRow, peakThresh);
 	setResult("rThresh", resultsRow, rThresh);
 	setResult("redMinimumSD", resultsRow, redMinimumSD);
 	setResult("redMinimum", resultsRow, redMinimum);
@@ -255,8 +258,10 @@ for (r = 0; r < nRois; r++) {
 	addSpotsToOverlay(xYellow, yYellow, nYellow, "yellow");
 	run("Select None");
 }
-selectImage(redSpotImageID);
-if (showRedSpotImage) {
+
+close(filteredTitle);
+selectImage(redBlobImageID);
+if (showRedBlobImage) {
 	run("Select None");
 	run("Enhance Contrast", "saturated=0.35");
 } else {
@@ -267,6 +272,8 @@ IJ.renameResults("Results-autoQC-" + paramString);
 
 setBatchMode("exit and display");
 
+selectWindow(inpTitle);
+roiManager("Show All");
 
 // --- function definitions ---
 
@@ -328,4 +335,19 @@ function baseName(filename) {
     } else {
     	return filename;
     }
+}
+
+function appendChannelInfoToSliceLabels(imageID, channel, channelInfo) {
+    // for given hyperstack channel, append info to end of each slice label
+    selectImage(imageID);
+    getDimensions(w, h, nc, nz, nt);
+    //setBatchMode("hide");
+    for (z = 1; z <= nz; z++) {
+        for (t = 1; t <= nt; t++) {
+            Stack.setPosition(channel, z, t); 
+            sliceLabel = Property.getSliceLabel();
+            Property.setSliceLabel(sliceLabel + channelInfo);
+        }   
+    }   
+    //setBatchMode("exit and display");
 }

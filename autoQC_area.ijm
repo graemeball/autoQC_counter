@@ -8,8 +8,8 @@
 //
 // Output:
 // - output image with cell ROIs and multi-point spot ROIs added to overlay:
-//   - with additional "redOnlySpotMask" and "redAndYellowSpotMask" output channels
-//   - output channel 1=red, 2=green, 3=red+yellow (yellow), 4=red only (magenta)
+//   - with additional "yellow object" and "red object" output channels
+//   - output channel 1=red, 2=green, 3=yellow objects (yellow), 4=red objects (magenta)
 // - summary results: 1 row per cell ROI (results for all images appended to table):
 //   - Image name
 //   - Cell ROI name and X,Y centroid position
@@ -18,6 +18,7 @@
 //   - number of red spots, nRed
 //   - number of red+green spots, nYellow
 //   - total areas of: red, yellow, red+yellow
+//   - per-cell table with per-particle areas, shape, and 2-channel intensity stats
 //   - (parameters: peakNstd,redMinimumSD,rThresh,spotSize)
 //
 // g.ball@dundee.ac.uk, Dundee Imaging Facility (2020-2023)
@@ -30,9 +31,12 @@ redCh = 2;  // channel for mitophagy marker (red)
 peakNstd = 2;  // standard deviations above mean for peaks (red channel)
 redMinimumSD = 2.5;  // minimum red intensity for spots: mean+/-nStdDev
 rThresh = 1.0;  // minimum red/green value for red spots
-spotSize = 0.1;  // calibrated units (microns)
+spotSize = 0.1;  // smallest spot radius, in calibrated units (microns)
 DoGmultiplier = 5;  // multiplier for DoG filter
 showRedBlobImage = false;  // option to show red blob image
+shapeMeasures = "area centroid perimeter fit shape";
+intensMeasures = newArray("Mean", "StdDev", "Min", "RawIntDen", "Median");
+amber = "#ffbf00";
 
 
 // --- start Macro ---
@@ -41,8 +45,8 @@ if (Overlay.size > 0) {
 }
 
 // check we have at least 1 ROI & composite image before going further
-nRois = roiManager("count");
-if (nRois < 1) {
+nCells = roiManager("count");
+if (nCells < 1) {
 	exit("Please add at least 1 cell outline to ROI Manager!");
 }
 if (!is("composite")) {
@@ -61,6 +65,10 @@ Stack.getUnits(xu, yu, zu, tu, vu);
 areaUnits = "" + xu + "2";
 inpBitDepth = bitDepth();
 
+// image summary results table
+paramString = "R" + redCh + "_G" + grnCh;
+resultsName = "Results-autoQC-" + paramString;
+Table.create(resultsName);
 
 // dialog to check/update channels & options
 Dialog.create("autoQC_area");
@@ -81,6 +89,7 @@ rThresh = Dialog.getNumber();
 
 setBatchMode("hide");  // hide images during calculations
 setOption("BlackBackground", true);
+resetMeasureOptions();
 
 // pre-process with median filter
 run("Select None");
@@ -102,39 +111,48 @@ selectImage(redBlobImageID);
 run("Select None");
 getStatistics(area, mean, min, max, std);  // whole image
 peakThresh = peakNstd * std;
+minimumSpotVolume = 2 * 3.14 * spotSize * spotSize;  // >smallest volume (um2)
 
 run("Clear Results");
 resultsRow = 0;
-// iterate over ROIs/cells - write results row and results image for each
-for (r = 0; r < nRois; r++) {
+// iterate over cells - write results row and results image for each
+nRedParticlesPerCell = newArray(nCells);
+nYellowParticlesPerCell = newArray(nCells);
+for (iCell = 0; iCell < nCells; iCell++) {
+	cellResultsName = resultsName + "-cell" + iCell;
 	selectWindow("redBlobImage");
-	setResult("Image", resultsRow, inpTitle);
-	setResult("RoiN", resultsRow, r);
+	Table.set("Image", resultsRow, inpTitle);
+	Table.set("RoiN", resultsRow, iCell);
 	// find peaks in DoG-filtered red "spot image"
-	roiManager("select", r);
-	setResult("RoiName", resultsRow, Roi.getName());
-	setResult("RoiX", resultsRow, getValue("X"));
-	setResult("RoiY", resultsRow, getValue("Y"));
-	setResult("CellArea_" + areaUnits, resultsRow, getValue("Area"));
-	run("Duplicate...", "title=redBlobImage-" + r);
+	roiManager("select", iCell);
+	Table.set("RoiName", resultsRow, Roi.getName());
+	Table.set("RoiX", resultsRow, getValue("X"));
+	Table.set("RoiY", resultsRow, getValue("Y"));
+	Table.set("CellArea_" + areaUnits, resultsRow, getValue("Area"));
+	run("Duplicate...", "title=redBlobImage-" + iCell);
 	run("Find Maxima...", "prominence=" + peakThresh + " output=[Point Selection]");
 	getSelectionCoordinates(xc, yc);
 	nSpots = xc.length;
-	// create red spot image mask
-	roiManager("select", r);
+	
+	// create red spot image mask (before intensity & ratio thresholds)
+	roiManager("select", iCell);
 	setThreshold(peakThresh, max);
 	run("Convert to Mask");
 	rename("redSpotMask");
 	redSpotMaskID = getImageID();
+	
 	// create red/green ratio image mask
 	selectImage(filteredID);
-	roiManager("select", r);
+	roiManager("select", iCell);
 	Stack.setChannel(redCh);
 	run("Duplicate...", " ");
+	roiManager("Add");
+	cellRoiIndex = roiManager("count") - 1;
+	
 	rename("redChannelImage");
 	redImageID = getImageID();
 	selectImage(filteredID);
-	roiManager("select", r);
+	roiManager("select", iCell);
 	Stack.setChannel(grnCh);
 	run("Duplicate...", " ");
 	rename("greenChannelImage");
@@ -145,42 +163,95 @@ for (r = 0; r < nRois; r++) {
 	run("Convert to Mask");
 	rename("redOverGreenRatioMask");
 	ratioMaskID = getImageID();
+	
 	// create redMinimumMask
 	selectImage(redImageID);
 	run("Duplicate...", " ");
-	setThreshold(redMinimum, max);
+	redMax = getValue("Max");
+	setThreshold(redMinimum, redMax);
 	run("Convert to Mask");
 	rename("redAboveMinimumMask");
 	redAboveMinimumID = getImageID();
+	
 	// calculate mask for above-threshold red spots (i.e. red & yellow spots)
 	imageCalculator("AND create", "redSpotMask","redAboveMinimumMask");
 	rename("redAndYellowSpotMask");
 	redAndYellowSpotMaskID = getImageID();
-	selectImage(redSpotMaskID);
-	close();
-	selectImage(redAboveMinimumID);
-	close();
+	closeImage(redSpotMaskID);
+	closeImage(redAboveMinimumID);
 	selectImage(redAndYellowSpotMaskID);
 	areaRedAndYellow = getValue("Area");
-	//areaRedAndYellow = measureMaskArea(redAndYellowSpotMaskID, r);
-	run("" + inpBitDepth + "-bit");  // convert to input bit-depth for merge
-	// calculate mask for above-thresh red spots that are red (R/G above ratio thresh)
+	
+	// calculate mask for above-thresh red spots that are red only (R/G above ratio thresh)
 	imageCalculator("AND create", "redAndYellowSpotMask","redOverGreenRatioMask");
 	rename("redOnlySpotMask");
 	redOnlyMaskID = getImageID();
-	areaRedOnly = getValue("Area");
+	
+	// threshold & measure red particle area stats
+	run("8-bit");  // for watershed
+	run("Watershed");
+	run("" + inpBitDepth + "-bit");  // for merge
+	setThreshold(1, 255);
+	areaRedTotal = getValue("Area limit");
+	nRoisBefore = roiManager("count");
+	run("Set Measurements...", shapeMeasures + " redirect=None decimal=3");
+	run("Analyze Particles...", "size=" + minimumSpotVolume + "-Infinity display add");
+	nRoisAfter = roiManager("count");
+	nRedParticlesPerCell[iCell] = nRoisAfter - nRoisBefore;
+	redRoi0 = nRoisBefore;
+	redRoiN = nRoisAfter-1;
+	hadRedObjects = false;
+	if (redRoiN - redRoi0 > 0) {
+		hadRedObjects = true;
+		rOffset = redRoi0;  // offset between ROI manager indices and results table rows
+		renameRois(redRoi0, redRoiN, "cell" + iCell + "_redObj");
+		// measure red object intensity stats
+		measureRois("red", redRoi0, redRoiN, greenImageID, intensMeasures, rOffset, "green");
+		measureRois("red", redRoi0, redRoiN, redImageID, intensMeasures, rOffset, "red");
+	}
+	
+	// calculate mask image for above-thresh red spots that are "yellow" (R/G below ratio thresh)
+	imageCalculator("Subtract create", "redAndYellowSpotMask","redOnlySpotMask");
+	rename("yellowSpotMask");
+	yellowMaskID = getImageID();
+	run("8-bit");  // for watershed
+	run("Watershed");
+	run("" + inpBitDepth + "-bit");  // for merge
+	
+	// threshold & measure yellow particle area stats
+	setThreshold(1, 255);
+	areaYellowTotal = getValue("Area limit");
+	nRoisBefore = roiManager("count");
+	run("Analyze Particles...", "size=" + minimumSpotVolume + "-Infinity display add");
+	nRoisAfter = roiManager("count");
+	nYellowParticlesPerCell[iCell] = nRoisAfter - nRoisBefore;
+	yellowRoi0 = nRoisBefore;
+	yellowRoiN = nRoisAfter-1;
+	if (yellowRoiN - yellowRoi0 > 0) {
+		renameRois(yellowRoi0, yellowRoiN, "cell" + iCell + "_yellowObj");
+		// measure yellow object intensity stats
+		measureRois("yellow", yellowRoi0, yellowRoiN, greenImageID, intensMeasures, rOffset, "green");
+		measureRois("yellow", yellowRoi0, yellowRoiN, redImageID, intensMeasures, rOffset, "red");
+	}
+	close("redAndYellowSpotMask");
+	
+	
+	IJ.renameResults(cellResultsName);  // red, yellow object stats for cell
+	
+	// generate merge image with ROI overlays
 	run("" + inpBitDepth + "-bit");  // convert to input bit-depth for merge
-	selectImage(ratioMaskID);
-	close();
-	selectImage(greenImageID);
+	closeImage(ratioMaskID);
+	//selectImage(greenImageID);
 	C1name = "c1=redChannelImage";
 	C2name = "c2=greenChannelImage";
-	C3name = "c3=redAndYellowSpotMask";
+	//C3name = "c3=redAndYellowSpotMask";
+	C3name = "c3=yellowSpotMask";
 	C4name = "c4=redOnlySpotMask";
 	channelsString = "" + C1name + " " + C2name + " " +  C3name + " " + C4name + " create";
 	run("Merge Channels...", channelsString);
 	mergeID = getImageID();
-	rename(filteredTitle + "_ROI" + r);
+	rename(filteredTitle + "_ROI" + iCell);
+	
 	Stack.setChannel(1);
 	run("Red");
 	appendChannelInfoToSliceLabels(mergeID, 1, "red");
@@ -191,13 +262,16 @@ for (r = 0; r < nRois; r++) {
 	run("Enhance Contrast", "saturated=0.35");
 	Stack.setChannel(3);
 	run("Yellow");
-	appendChannelInfoToSliceLabels(mergeID, 3, "spotsRed+Yellow");
+	appendChannelInfoToSliceLabels(mergeID, 3, "yellowObjects");
 	setMinAndMax(0, 255);
 	Stack.setChannel(4);
 	run("Magenta");
-	appendChannelInfoToSliceLabels(mergeID, 4, "spotsRedOnly");
+	appendChannelInfoToSliceLabels(mergeID, 4, "redObjects");
 	setMinAndMax(0, 255);
-	// record cell ROI stats
+	addRoisToOverlay(cellRoiIndex, cellRoiIndex, "white");  // cell outline in crop
+	addRoisToOverlay(redRoi0, redRoiN, "red");  // red objects
+	addRoisToOverlay(yellowRoi0, yellowRoiN, amber);  // yellow objects
+	// calculate spot stats for this cell ROI
 	selectImage(mergeID);
 	nBlack = 0;
 	xBlack = newArray(nSpots);
@@ -237,26 +311,29 @@ for (r = 0; r < nRois; r++) {
 			}
 		}
 	}
-	// write stats row to results table
-	setResult("nBlack", resultsRow, nBlack);
-	setResult("nRed", resultsRow, nRed);
-	setResult("nYellow", resultsRow, nYellow);
-	setResult("areaRed_" + areaUnits, resultsRow, areaRedOnly);
-	setResult("areaRedAndYellow_" + areaUnits, resultsRow, areaRedAndYellow);
-	setResult("areaYellow_" + areaUnits, resultsRow, areaRedAndYellow - areaRedOnly);	
-	setResult("spotSize_" + areaUnits, resultsRow, spotSize);
-	setResult("peakNstd", resultsRow, peakNstd);
-	setResult("peakThresh", resultsRow, peakThresh);
-	setResult("rThresh", resultsRow, rThresh);
-	setResult("redMinimumSD", resultsRow, redMinimumSD);
-	setResult("redMinimum", resultsRow, redMinimum);
-	updateResults();
-	resultsRow++;
 	// Add coloured classified spots to overlay
 	addSpotsToOverlay(xBlack, yBlack, nBlack, "black");
 	addSpotsToOverlay(xRed, yRed, nRed, "red");
 	addSpotsToOverlay(xYellow, yYellow, nYellow, "yellow");
 	run("Select None");
+	
+	// write stats row to results table
+	Table.set("nBlackSpots", resultsRow, nBlack);
+	Table.set("nRedSpots", resultsRow, nRed);
+	Table.set("nYellowSpots", resultsRow, nYellow);
+	Table.set("areaRed_" + areaUnits, resultsRow, areaRedTotal);
+	Table.set("areaYellow_" + areaUnits, resultsRow, areaYellowTotal);
+	Table.set("areaRedAndYellow_" + areaUnits, resultsRow, areaRedAndYellow);
+	Table.set("nRedObjects", resultsRow, nRedParticlesPerCell[iCell]);
+	Table.set("nYellowObjects", resultsRow, nYellowParticlesPerCell[iCell]);
+	Table.set("spotSize_" + areaUnits, resultsRow, spotSize);
+	Table.set("peakNstd", resultsRow, peakNstd);
+	Table.set("peakThresh", resultsRow, peakThresh);
+	Table.set("rThresh", resultsRow, rThresh);
+	Table.set("redMinimumSD", resultsRow, redMinimumSD);
+	Table.set("redMinimum", resultsRow, redMinimum);
+	updateResults();
+	resultsRow++;
 }
 
 close(filteredTitle);
@@ -267,13 +344,12 @@ if (showRedBlobImage) {
 } else {
 	close();
 }
-paramString = "R" + redCh + "_G" + grnCh;
-IJ.renameResults("Results-autoQC-" + paramString);
 
 setBatchMode("exit and display");
 
 selectWindow(inpTitle);
-roiManager("Show All");
+roiManager("Show None");
+
 
 // --- function definitions ---
 
@@ -350,4 +426,67 @@ function appendChannelInfoToSliceLabels(imageID, channel, channelInfo) {
         }   
     }   
     //setBatchMode("exit and display");
+}
+
+//function id2ti(imageID) {
+//	// return image title for given imageID
+//	startingID = getImageID();
+//	selectImage(imageID);
+//	imageTitle = getTitle();
+//	selectImage(startingID);
+//	return imageTitle;
+//}
+
+function closeImage(imageID) {
+	// close image with given imageID
+	selectImage(imageID);
+	close();
+}
+
+function resetMeasureOptions() {
+	// reset measurement options to defaults (N.B. this blanks other measurements!)
+	defaultOptions = "area mean standard min max centroid integrated display";
+	run("Set Measurements...", defaultOptions + " redirect=None decimal=3");	
+}
+
+function renameRois(iFirst, iLast, prefix) {
+	// rename a list of ROIs from iFirst to iLast inclusive, to: prefix0..prefixN
+	roiManager("deselect");
+	n = 0;
+	for (i = iFirst; i <= iLast; i++) {
+		roiManager("select", i);
+		roiManager("rename", prefix + n);
+		n++;
+	}
+	roiManager("deselect");
+}
+
+function addRoisToOverlay(iFirst, iLast, color) {
+	// add ROIs iFirst to iLast inclusive to Overlay with color specified
+	roiManager("deselect");
+	for (i = iFirst; i <= iLast; i++) {
+		roiManager("select", i);
+		Roi.setStrokeColor(color);
+		run("Add Selection...");
+	}
+	roiManager("deselect");
+}
+
+function measureRois(object, iFirst, iLast, imageID, measurements, offset, label) {
+	// measure series of ROIs on current channel of active image, where:
+	//  object added as new column to identify what ROIs are
+	//  iFirst, iLast are first and last ROI indices of interest in manager
+	//  imageID is the ID of the image to measure
+	//  measurements is list of measurements for getValue()
+	//  offset is subtracted from ROI index to generate index into results table
+	//  label is prefixed to measurement column names to indicate channel measured
+	//  results are written to default Results table 
+	selectImage(imageID);
+	for (i = iFirst; i <= iLast; i++) {
+		roiManager("select", i);
+		setResult("Object", i-offset, object);
+		for (m = 0; m < measurements.length; m++) {
+			setResult(label+measurements[m], i-offset, getValue(measurements[m]));
+		}
+	}
 }

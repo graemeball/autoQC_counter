@@ -239,7 +239,9 @@ for (imageNo = 0; imageNo < numberOfImages; imageNo++) {
 			closeImage(redSpotMaskID);
 			closeImage(redAboveMinimumID);
 			selectImage(redAndYellowSpotMaskID);
-			areaRedAndYellow = getValue("Area");
+			setThreshold(1, 255);
+			areaRedAndYellow = getValue("Area limit");
+			resetThreshold();
 			
 			// calculate mask for above-thresh red spots that are red only (R/G above ratio thresh)
 			imageCalculator("AND create", "redAndYellowSpotMask","redOverGreenRatioMask");

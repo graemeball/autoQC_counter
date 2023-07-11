@@ -264,7 +264,7 @@ for (imageNo = 0; imageNo < numberOfImages; imageNo++) {
 			redRoi0 = nRoisBefore;
 			redRoiN = nRoisAfter-1;
 			hadRedObjects = false;
-			if (redRoiN - redRoi0 > 0) {
+			if (nRedParticlesPerCell[iCell] > 0) {
 				hadRedObjects = true;
 				rOffset = redRoi0;  // offset between ROI manager indices and Results table rows
 				renameRois(redRoi0, redRoiN, "cell" + iCell + "_redObj");
@@ -272,6 +272,8 @@ for (imageNo = 0; imageNo < numberOfImages; imageNo++) {
 				// measure red object intensity stats
 				measureRois("red", redRoi0, redRoiN, greenImageID, intensMeasures, rOffset, "green");
 				measureRois("red", redRoi0, redRoiN, redImageID, intensMeasures, rOffset, "red");
+			} else {
+				rOffset = -1;  // try to update later with first yellow object
 			}
 			
 			// calculate mask image for above-thresh red spots that are "yellow" (R/G below ratio thresh)
@@ -293,8 +295,11 @@ for (imageNo = 0; imageNo < numberOfImages; imageNo++) {
 			nYellowParticlesPerCell[iCell] = nRoisAfter - nRoisBefore;
 			yellowRoi0 = nRoisBefore;
 			yellowRoiN = nRoisAfter-1;
-			if (yellowRoiN - yellowRoi0 > 0) {
+			if (nYellowParticlesPerCell[iCell] > 0) {
 				renameRois(yellowRoi0, yellowRoiN, "cell" + iCell + "_yellowObj");
+				if (rOffset == -1) {
+					rOffset = yellowRoi0;  // offset between ROI manager indices and Results table rows (where no red objects)
+				}
 				updateLabelValuesWithROInames(yellowRoi0, yellowRoiN, rOffset);
 				// measure yellow object intensity stats
 				measureRois("yellow", yellowRoi0, yellowRoiN, greenImageID, intensMeasures, rOffset, "green");
@@ -306,7 +311,7 @@ for (imageNo = 0; imageNo < numberOfImages; imageNo++) {
 			IJ.renameResults(cellResultsName);  // red, yellow object stats for cell
 			if (doBatch) {				
 				saveAs("Results", outputFolder + File.separator + cellResultsName + ".csv");
-				close(cellResultsName);
+				close(cellResultsName + ".csv");
 			}
 			
 			// 3b.II.iii) generate merge image with ROI overlays
